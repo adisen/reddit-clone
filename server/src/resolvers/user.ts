@@ -7,9 +7,11 @@ import {
   InputType,
   Mutation,
   ObjectType,
+  Query,
   Resolver
 } from 'type-graphql'
 import argon2 from 'argon2'
+import { EntityManager } from '@mikro-orm/postgresql'
 
 @InputType()
 class UsernamePasswordInput {
@@ -40,10 +42,22 @@ class UserResponse {
 
 @Resolver()
 export class UserResolver {
+  @Query(() => User, { nullable: true })
+  async me(@Ctx() { req, em }: MyContext) {
+    console.log(req.session)
+    // you are not logged in
+    if (!req.session.userId) {
+      return null
+    }
+
+    const user = await em.findOne(User, { id: req.session.userId })
+    return user
+  }
+
   @Mutation(() => UserResponse)
   async register(
     @Arg('options') options: UsernamePasswordInput,
-    @Ctx() { em }: MyContext
+    @Ctx() { em, req }: MyContext
   ): Promise<UserResponse> {
     if (options.username.length <= 2) {
       return {
@@ -56,7 +70,7 @@ export class UserResolver {
       }
     }
 
-    if (options.username.length <= 3) {
+    if (options.password.length <= 2) {
       return {
         errors: [
           {
@@ -68,13 +82,21 @@ export class UserResolver {
     }
 
     const hashedPassword = await argon2.hash(options.password)
-    const user = em.create(User, {
-      username: options.username,
-      password: hashedPassword
-    })
 
+    let user
     try {
-      await em.persistAndFlush(user)
+      const result = await (em as EntityManager)
+        .createQueryBuilder(User)
+        .getKnexQuery()
+        .insert({
+          username: options.username,
+          password: hashedPassword,
+          created_at: new Date(),
+          updated_at: new Date()
+        })
+        .returning('*')
+
+      user = result[0]
     } catch (error) {
       if (error.code == '23505') {
         return {
@@ -88,13 +110,16 @@ export class UserResolver {
       }
     }
 
+    //store user id session
+    req.session.userId = user.id
+
     return { user }
   }
 
   @Mutation(() => UserResponse)
   async login(
     @Arg('options') options: UsernamePasswordInput,
-    @Ctx() { em, req }: MyContext
+    @Ctx() { req, em }: MyContext
   ): Promise<UserResponse> {
     const user = await em.findOne(User, { username: options.username })
     if (!user) {
